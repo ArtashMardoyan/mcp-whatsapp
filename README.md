@@ -45,27 +45,32 @@ make build    # writes ./bin/whatsapp-mcp
 Start the daemon, then open the pairing page in a browser:
 
 ```bash
-./bin/whatsapp-mcp serve          # starts on 127.0.0.1:8765
-open http://127.0.0.1:8765/pair   # macOS; or visit the URL manually
+./bin/whatsapp-mcp serve          # starts on 127.0.0.1:8765, creates store/auth-token
+open "http://127.0.0.1:8765/pair?token=$(cat store/auth-token)"   # macOS; or visit the URL manually
 ```
 
 Scan the QR with WhatsApp (*Settings → Linked Devices → Link a Device*). The session persists to `./store/whatsapp.db`; WhatsApp rotates it roughly every 20 days, when `/pair` shows a fresh QR.
 
 - **No browser:** `./bin/whatsapp-mcp login` renders the QR in the terminal.
 - **No QR scan:** use the phone-number form on `/pair` (or `login -phone +<international number>`), then type the code into *Link a Device → Link with phone number instead*.
+- `/pair?token=…` sets an HttpOnly cookie and redirects, so the token leaves the address bar.
 - The `/pair/*` endpoints are CSRF-protected and rate-limited (15 GET/min, 1 reset/min, 3 code requests/min).
 
 ### Connect your MCP client
 
 `serve` listens on `127.0.0.1:8765` (or `$WHATSAPP_MCP_ADDR`) and serves MCP at `/mcp`. It is stateless (no `Mcp-Session-Id`) and speaks MCP 2026-07-28 as well as older revisions.
 
+**Auth is always on, loopback too.** On first start `serve` writes a random token to `<store>/auth-token` (mode 0600) and prints only that file path. Every `/mcp` and `/pair` request needs `Authorization: Bearer <token>`. `WHATSAPP_MCP_TOKEN`, if set, is used instead of the file. On loopback the daemon also rejects any `Host` other than `127.0.0.1`, `localhost` or `[::1]` on its port (DNS-rebinding guard), and on every bind it rejects requests whose `Origin` is not the daemon itself.
+
 ```jsonc
 // Claude Code (.claude/mcp.json or ~/.claude/mcp.json) and Cursor (~/.cursor/mcp.json)
-{ "mcpServers": { "whatsapp": { "type": "http", "url": "http://127.0.0.1:8765/mcp" } } }
+{ "mcpServers": { "whatsapp": { "type": "http", "url": "http://127.0.0.1:8765/mcp",
+  "headers": { "Authorization": "Bearer <contents of store/auth-token>" } } } }
 
 // Claude Desktop only launches stdio servers, so bridge with mcp-remote
 // (~/Library/Application Support/Claude/claude_desktop_config.json)
-{ "mcpServers": { "whatsapp": { "command": "npx", "args": ["-y", "mcp-remote", "http://127.0.0.1:8765/mcp"] } } }
+{ "mcpServers": { "whatsapp": { "command": "npx", "args": ["-y", "mcp-remote", "http://127.0.0.1:8765/mcp",
+  "--header", "Authorization: Bearer <contents of store/auth-token>"] } } }
 ```
 
 Restart the client. The daemon outlives client restarts.
@@ -86,7 +91,8 @@ Paths outside the root, including symlinks that resolve outside it, are rejected
 ### Serve flags and environment
 
 - `-addr host:port` (env `WHATSAPP_MCP_ADDR`, default `127.0.0.1:8765`).
-- `-allow-remote`: bind a non-loopback address. Requires `WHATSAPP_MCP_TOKEN`, a bearer token for `/mcp` and `/pair/*`; `serve` exits without it.
+- `-allow-remote`: bind a non-loopback address. Requires `WHATSAPP_MCP_TOKEN` (the bearer token; the token file is not used); `serve` exits without it. The Host check is off in this mode; the Origin check stays on.
+- `-read-only`: register only tools annotated read-only (list/get/search). Nothing that sends, edits, deletes, downloads or changes settings is exposed.
 - `WHATSAPP_MCP_MEDIA_ROOT`: the file allowlist root above.
 - `WHATSAPP_MCP_DEBUG=1` or `-debug`: verbose logs (see [Debug logging](#debug-logging)).
 
@@ -148,13 +154,15 @@ Data lives under `./store/` (`-store DIR`): `messages.db` (message cache), `what
 
 | Tool | Purpose |
 |---|---|
-| `send_message` | Send a text message to a phone number or JID |
+| `send_message` | Send a text message to a phone number or JID; optional `mentions` (group members as phone numbers or JIDs) |
 | `send_file` | Send image/video/document/raw audio with optional caption; `view_once: bool` marks image/video/audio submessages as view-once (ignored for documents) |
 | `send_audio_message` | Send a voice note (auto-converts via ffmpeg if not `.ogg` Opus); supports `view_once: bool` |
 | `send_poll` | Send a poll with a question and 2+ options; `selectable_count` controls how many options a voter may pick. Generates the 32-byte `MessageSecret` required for votes to decrypt |
 | `send_poll_vote` | Cast a vote on a previously-seen poll; `options` must match option names exactly |
 | `get_poll_results` | Return the tally for a poll we have cached (includes 0-vote options) |
 | `send_contact_card` | Send a contact card; synthesises a vCard 3.0 from `name` + `phone`, or pass a raw `vcard` to skip synthesis |
+
+Mentions: each entry must be a participant of the target group, or nothing is sent. The message carries WhatsApp mention metadata (the member's LID in LID-addressed groups), and `@<number>` is prepended for any mention the text does not already contain.
 
 ### Message actions
 
@@ -163,7 +171,7 @@ Data lives under `./store/` (`-store DIR`): `messages.db` (message cache), `what
 | `mark_read` | Mark specific message IDs as read |
 | `mark_chat_read` | Ack the most recent incoming messages in a chat to clear the unread badge |
 | `send_reaction` | React to a message (empty emoji clears an existing reaction) |
-| `send_reply` | Text reply that quotes a prior message |
+| `send_reply` | Text reply that quotes a prior message; optional `mentions` like `send_message` |
 | `edit_message` | Edit a previously-sent message |
 | `delete_message` | Revoke (delete for everyone) a message |
 | `send_typing` | Set per-chat composing / recording presence |
@@ -249,7 +257,7 @@ This bumps `go.mau.fi/whatsmeow@main`, re-tidies, builds, and tests. If green, c
 
 ## Troubleshooting
 
-- **`connect failed …` on `serve`** — the daemon is not paired. Open `http://127.0.0.1:8765/pair` in a browser and scan the QR. Alternatively, run `./bin/whatsapp-mcp login` in a terminal.
+- **`connect failed …` on `serve`** — the daemon is not paired. Open `http://127.0.0.1:8765/pair?token=<contents of store/auth-token>` in a browser and scan the QR. Alternatively, run `./bin/whatsapp-mcp login` in a terminal.
 - **`another whatsapp-mcp instance is already running`** — only one `serve` can hold the store lock. Check for a stray process (`ps aux | grep whatsapp-mcp`) or another MCP client pointed at the same `-store` directory.
 - **QR doesn't display** — the terminal doesn't render half-block Unicode. Try iTerm2, Windows Terminal, or similar.
 - **Device limit reached** — WhatsApp caps linked devices. Remove one from *Settings → Linked Devices* on your phone.
