@@ -24,12 +24,15 @@ func (s *Server) registerSendTools() {
 	s.registerSendTyping()
 }
 
+const mentionsDesc = "optional group members to @-mention, as phone digits or JIDs; each must be a participant of the group or nothing is sent. `@<number>` is prepended to the text for any mention the text does not already contain"
+
 // -- send_message -----------------------------------------------------------
 
 type sendMessageArgs struct {
-	Recipient    string `json:"recipient"`
-	Message      string `json:"message"`
-	MarkChatRead bool   `json:"mark_chat_read,omitempty"`
+	Recipient    string   `json:"recipient"`
+	Message      string   `json:"message"`
+	MarkChatRead bool     `json:"mark_chat_read,omitempty"`
+	Mentions     []string `json:"mentions,omitempty"`
 }
 
 func (s *Server) registerSendMessage() {
@@ -38,6 +41,7 @@ func (s *Server) registerSendMessage() {
 		mcp.WithString("recipient", mcp.Required(), mcp.Description(recipientDesc)),
 		mcp.WithString("message", mcp.Required(), mcp.Description("message body text")),
 		mcp.WithBoolean("mark_chat_read", mcp.DefaultBool(false), mcp.Description("if true, also ack recent incoming messages in the chat to clear the unread badge (defaults to false)")),
+		mcp.WithArray("mentions", mcp.Items(map[string]any{"type": "string"}), mcp.Description(mentionsDesc)),
 		mcp.WithReadOnlyHintAnnotation(false),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithIdempotentHintAnnotation(false),
@@ -48,7 +52,7 @@ func (s *Server) registerSendMessage() {
 			return mcp.NewToolResultError("recipient must be provided"), nil
 		}
 		ctx = withRateLimitOverride(ctx, req)
-		r := s.client.Send(ctx, a.Recipient, a.Message)
+		r := s.client.Send(ctx, a.Recipient, a.Message, a.Mentions)
 		s.maybeMarkChatRead(ctx, r, a.Recipient, a.MarkChatRead)
 		return resultJSON(r)
 	}))
@@ -178,10 +182,11 @@ func (s *Server) registerSendReaction() {
 // -- send_reply -------------------------------------------------------------
 
 type sendReplyArgs struct {
-	ChatJID         string `json:"chat_jid"`
-	TargetMessageID string `json:"target_message_id"`
-	TargetSenderJID string `json:"target_sender_jid,omitempty"`
-	Body            string `json:"body"`
+	ChatJID         string   `json:"chat_jid"`
+	TargetMessageID string   `json:"target_message_id"`
+	TargetSenderJID string   `json:"target_sender_jid,omitempty"`
+	Body            string   `json:"body"`
+	Mentions        []string `json:"mentions,omitempty"`
 }
 
 func (s *Server) registerSendReply() {
@@ -191,13 +196,14 @@ func (s *Server) registerSendReply() {
 		mcp.WithString("target_message_id", mcp.Required(), mcp.Description("WhatsApp message ID of the message being quoted (use `message_id` from list_messages)")),
 		mcp.WithString("target_sender_jid", mcp.Description("JID of the quoted message's original sender; required in group chats, omit in 1:1 chats ("+jidDesc+")")),
 		mcp.WithString("body", mcp.Required(), mcp.Description("reply text body")),
+		mcp.WithArray("mentions", mcp.Items(map[string]any{"type": "string"}), mcp.Description(mentionsDesc)),
 		mcp.WithReadOnlyHintAnnotation(false),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithIdempotentHintAnnotation(false),
 		mcp.WithOpenWorldHintAnnotation(true),
 	)
 	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, a sendReplyArgs) (*mcp.CallToolResult, error) {
-		if err := s.client.SendReply(ctx, a.ChatJID, a.TargetMessageID, a.TargetSenderJID, a.Body); err != nil {
+		if err := s.client.SendReply(ctx, a.ChatJID, a.TargetMessageID, a.TargetSenderJID, a.Body, a.Mentions); err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		return mcp.NewToolResultText("Reply sent"), nil
