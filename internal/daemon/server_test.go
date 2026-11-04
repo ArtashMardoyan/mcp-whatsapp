@@ -311,10 +311,11 @@ func TestServer_PairTokenCookie(t *testing.T) {
 	if got := status(t, req); got != http.StatusOK {
 		t.Fatalf("cookie GET /pair: want 200, got %d", got)
 	}
-	// Without any credentials /mcp stays closed.
+	// The pairing cookie does not unlock /mcp.
 	req, _ = http.NewRequest(http.MethodPost, base+"/mcp", nil)
+	req.AddCookie(cookies[0])
 	if got := status(t, req); got != http.StatusUnauthorized {
-		t.Fatalf("no auth POST /mcp: want 401, got %d", got)
+		t.Fatalf("cookie POST /mcp: want 401, got %d", got)
 	}
 }
 

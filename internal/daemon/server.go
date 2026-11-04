@@ -211,8 +211,8 @@ func authMiddleware(next http.Handler, token string) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// One-time browser login: /pair?token=... sets the cookie, then
-		// redirects so the token leaves the address bar and history.
+		// Browser login: /pair?token=... sets the cookie, then redirects to
+		// /pair so later page loads and form posts carry no token in the URL.
 		if q := r.URL.Query().Get("token"); q != "" && r.URL.Path == "/pair" {
 			if subtle.ConstantTimeCompare([]byte(q), []byte(token)) != 1 {
 				unauthorized(w)
@@ -223,7 +223,8 @@ func authMiddleware(next http.Handler, token string) http.Handler {
 			return
 		}
 		got := r.Header.Get("Authorization")
-		if c, err := r.Cookie(authCookie); err == nil && got == "" {
+		// The cookie is only for the browser pairing UI; /mcp needs the header.
+		if c, err := r.Cookie(authCookie); err == nil && got == "" && isPairPath(r.URL.Path) {
 			got = "Bearer " + c.Value
 		}
 		if subtle.ConstantTimeCompare([]byte(got), expected) != 1 {
@@ -260,11 +261,9 @@ func originGuard(next http.Handler, allowedHosts []string) http.Handler {
 }
 
 func requiresAuth(path string) bool {
-	if path == "/mcp" || strings.HasPrefix(path, "/mcp/") {
-		return true
-	}
-	if path == "/pair" || strings.HasPrefix(path, "/pair/") {
-		return true
-	}
-	return false
+	return path == "/mcp" || strings.HasPrefix(path, "/mcp/") || isPairPath(path)
+}
+
+func isPairPath(path string) bool {
+	return path == "/pair" || strings.HasPrefix(path, "/pair/")
 }
