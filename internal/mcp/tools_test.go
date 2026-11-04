@@ -151,3 +151,19 @@ func TestToolsByDomain(t *testing.T) {
 		}
 	}
 }
+
+func TestRestrictToReadOnly(t *testing.T) {
+	s := NewServer(nil, nil)
+	s.RestrictToReadOnly()
+	tools := s.MCP().ListTools()
+	for _, name := range []string{"send_message", "send_reply", "delete_message", "leave_group", "download_media"} {
+		if _, ok := tools[name]; ok {
+			t.Errorf("%s still registered in read-only mode", name)
+		}
+	}
+	for _, name := range []string{"list_messages", "list_chats", "get_group_info", "pairing_status"} {
+		if _, ok := tools[name]; !ok {
+			t.Errorf("%s missing in read-only mode", name)
+		}
+	}
+}

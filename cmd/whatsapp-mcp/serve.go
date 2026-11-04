@@ -23,11 +23,13 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 	var (
 		addr        string
 		allowRemote bool
+		readOnly    bool
 	)
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.StringVar(&addr, "addr", "", "HTTP bind address (default: 127.0.0.1:8765, env WHATSAPP_MCP_ADDR)")
 	fs.BoolVar(&allowRemote, "allow-remote", false, "allow binding to a non-loopback address")
+	fs.BoolVar(&readOnly, "read-only", false, "register only read-only MCP tools (no sends or state changes)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -120,6 +122,10 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 	}
 
 	mcpServer := mcpsrv.NewServer(c, d.Cache())
+	if readOnly {
+		mcpServer.RestrictToReadOnly()
+		fmt.Fprintln(os.Stderr, "read-only mode: tools that send or change state are not registered")
+	}
 	d.SetMCPMount(mcpServer.AttachHTTP)
 
 	fmt.Fprintf(os.Stderr, "whatsapp-mcp listening on http://%s (MCP at /mcp, pairing at /pair)\n", addr)
