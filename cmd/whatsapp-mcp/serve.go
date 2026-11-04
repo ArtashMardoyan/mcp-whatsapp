@@ -64,6 +64,10 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 		fmt.Fprintln(os.Stderr, "-allow-remote requires WHATSAPP_MCP_TOKEN to be set in the environment")
 		return 2
 	}
+	if authToken != "" && len(authToken) < daemon.MinTokenLen {
+		fmt.Fprintf(os.Stderr, "WHATSAPP_MCP_TOKEN must be at least %d characters\n", daemon.MinTokenLen)
+		return 2
+	}
 	tokenHint := "the WHATSAPP_MCP_TOKEN value"
 	if authToken == "" {
 		tokenPath := filepath.Join(absStore, "auth-token")

@@ -9,6 +9,10 @@ import (
 	"strings"
 )
 
+// MinTokenLen is the shortest bearer token serve accepts, from the file or
+// from WHATSAPP_MCP_TOKEN.
+const MinTokenLen = 16
+
 // LoadOrCreateToken returns the bearer token stored at path, creating it with
 // 32 random bytes (hex) and mode 0600 on first use. The token is never logged.
 func LoadOrCreateToken(path string) (string, error) {
@@ -40,7 +44,7 @@ func LoadOrCreateToken(path string) (string, error) {
 		return "", fmt.Errorf("read token file: %w", err)
 	}
 	tok := strings.TrimSpace(string(raw))
-	if len(tok) < 16 {
+	if len(tok) < MinTokenLen {
 		return "", fmt.Errorf("token file %s is empty or too short; delete it to regenerate", path)
 	}
 	return tok, nil
