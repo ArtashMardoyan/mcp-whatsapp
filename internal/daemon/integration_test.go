@@ -11,7 +11,7 @@ import (
 
 func TestIntegration_PairPageAccessibleOverHTTP(t *testing.T) {
 	drv := newFakePairDriver(false)
-	s, err := New(Config{Addr: "127.0.0.1:0", Driver: drv})
+	s, err := New(Config{Addr: "127.0.0.1:0", Driver: drv, AuthToken: testToken, LoopbackOnly: true})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -30,7 +30,7 @@ func TestIntegration_PairPageAccessibleOverHTTP(t *testing.T) {
 
 func TestIntegration_MCPEndpointReturns503WhenUnmounted(t *testing.T) {
 	drv := newFakePairDriver(true)
-	s, err := New(Config{Addr: "127.0.0.1:0", Driver: drv})
+	s, err := New(Config{Addr: "127.0.0.1:0", Driver: drv, AuthToken: testToken, LoopbackOnly: true})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -45,6 +45,7 @@ func TestIntegration_MCPEndpointReturns503WhenUnmounted(t *testing.T) {
 	// The stub handler responds with 503 on any method.
 	req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader("{}"))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST /mcp: %v", err)
@@ -60,7 +61,9 @@ func assertHTTP(t *testing.T, url string, wantStatus int, wantBodySubstring stri
 	deadline := time.Now().Add(2 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url) //nolint:noctx
+		req, _ := http.NewRequest(http.MethodGet, url, nil) //nolint:noctx
+		req.Header.Set("Authorization", "Bearer "+testToken)
+		resp, err := http.DefaultClient.Do(req)
 		if err == nil {
 			func() {
 				defer resp.Body.Close()

@@ -23,11 +23,13 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 	var (
 		addr        string
 		allowRemote bool
+		readOnly    bool
 	)
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.StringVar(&addr, "addr", "", "HTTP bind address (default: 127.0.0.1:8765, env WHATSAPP_MCP_ADDR)")
 	fs.BoolVar(&allowRemote, "allow-remote", false, "allow binding to a non-loopback address")
+	fs.BoolVar(&readOnly, "read-only", false, "register only read-only MCP tools (no sends or state changes)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -36,18 +38,6 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 	if !allowRemote && !isLoopbackAddr(addr) {
 		fmt.Fprintf(os.Stderr, "refusing to bind to non-loopback address %q; pass -allow-remote if you mean it\n", addr)
 		return 2
-	}
-
-	// When binding to a non-loopback address we require a shared bearer
-	// token. Loopback-only operation intentionally keeps no token so local
-	// editors and curl can hit the daemon without extra setup.
-	var authToken string
-	if allowRemote {
-		authToken = os.Getenv("WHATSAPP_MCP_TOKEN")
-		if authToken == "" {
-			fmt.Fprintln(os.Stderr, "-allow-remote requires WHATSAPP_MCP_TOKEN to be set in the environment")
-			return 2
-		}
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -64,6 +54,29 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "resolve store dir: %v\n", err)
 		return 1
+	}
+
+	// Bearer auth is always on. Remote binds keep using WHATSAPP_MCP_TOKEN;
+	// otherwise the token lives in <store>/auth-token (0600). Only the file
+	// path is printed, never the token.
+	authToken := os.Getenv("WHATSAPP_MCP_TOKEN")
+	if allowRemote && authToken == "" {
+		fmt.Fprintln(os.Stderr, "-allow-remote requires WHATSAPP_MCP_TOKEN to be set in the environment")
+		return 2
+	}
+	if authToken != "" && len(authToken) < daemon.MinTokenLen {
+		fmt.Fprintf(os.Stderr, "WHATSAPP_MCP_TOKEN must be at least %d characters\n", daemon.MinTokenLen)
+		return 2
+	}
+	tokenHint := "the WHATSAPP_MCP_TOKEN value"
+	if authToken == "" {
+		tokenPath := filepath.Join(absStore, "auth-token")
+		if authToken, err = daemon.LoadOrCreateToken(tokenPath); err != nil {
+			fmt.Fprintf(os.Stderr, "auth token: %v\n", err)
+			return 1
+		}
+		tokenHint = "the contents of " + tokenPath
+		fmt.Fprintf(os.Stderr, "auth token file: %s (send it as `Authorization: Bearer <token>`)\n", tokenPath)
 	}
 	allowedMediaRoot := os.Getenv("WHATSAPP_MCP_MEDIA_ROOT")
 	if allowedMediaRoot == "" {
@@ -102,9 +115,10 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 	// to the MCP server (so pairing_status can surface the live QR), then
 	// mount the MCP HTTP handler back onto the daemon.
 	d, err := daemon.New(daemon.Config{
-		Addr:      addr,
-		Driver:    drv,
-		AuthToken: authToken,
+		Addr:         addr,
+		Driver:       drv,
+		AuthToken:    authToken,
+		LoopbackOnly: !allowRemote,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "daemon.New: %v\n", err)
@@ -112,11 +126,15 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 	}
 
 	mcpServer := mcpsrv.NewServer(c, d.Cache())
+	if readOnly {
+		mcpServer.RestrictToReadOnly()
+		fmt.Fprintln(os.Stderr, "read-only mode: tools that send or change state are not registered")
+	}
 	d.SetMCPMount(mcpServer.AttachHTTP)
 
 	fmt.Fprintf(os.Stderr, "whatsapp-mcp listening on http://%s (MCP at /mcp, pairing at /pair)\n", addr)
 	if !c.IsLoggedIn() {
-		fmt.Fprintf(os.Stderr, "unpaired: open http://%s/pair to scan QR\n", addr)
+		fmt.Fprintf(os.Stderr, "unpaired: open http://%s/pair?token=<token> to scan QR (token = %s)\n", addr, tokenHint)
 	}
 	if err := d.Run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fmt.Fprintf(os.Stderr, "daemon: %v\n", err)

@@ -112,7 +112,8 @@ func (c *Client) SendReaction(ctx context.Context, chatJID, messageID, senderJID
 }
 
 // SendReply sends a text reply that quotes targetMessageID from chatJID.
-func (c *Client) SendReply(ctx context.Context, chatJID, targetMessageID, targetSenderJID, body string) error {
+// mentions (phone digits or JIDs, groups only) become @-mentions.
+func (c *Client) SendReply(ctx context.Context, chatJID, targetMessageID, targetSenderJID, body string, mentions []string) error {
 	if !c.wa.IsConnected() {
 		return errors.New("not connected to WhatsApp")
 	}
@@ -131,19 +132,23 @@ func (c *Client) SendReply(ctx context.Context, chatJID, targetMessageID, target
 		}
 	}
 
+	body, mentionInfo, err := c.mentionContext(ctx, chat, body, mentions)
+	if err != nil {
+		return err
+	}
 	ctxInfo := &waProto.ContextInfo{
 		StanzaID: proto.String(targetMessageID),
+	}
+	if mentionInfo != nil {
+		ctxInfo.MentionedJID = mentionInfo.MentionedJID
 	}
 	if participant != "" {
 		ctxInfo.Participant = proto.String(participant)
 	}
 
 	msg := &waProto.Message{
-		ExtendedTextMessage: &waProto.ExtendedTextMessage{
-			Text:        proto.String(body),
-			ContextInfo: ctxInfo,
-		},
-		MessageContextInfo: c.ephemeralContextInfo(ctx, chat),
+		ExtendedTextMessage: mentionText(body, ctxInfo),
+		MessageContextInfo:  c.ephemeralContextInfo(ctx, chat),
 	}
 
 	if _, err := c.wa.SendMessage(ctx, chat, msg); err != nil {

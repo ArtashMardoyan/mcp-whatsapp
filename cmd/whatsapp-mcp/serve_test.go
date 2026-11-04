@@ -20,3 +20,10 @@ func TestIsLoopbackAddr(t *testing.T) {
 		})
 	}
 }
+
+func TestRunServe_RejectsShortEnvToken(t *testing.T) {
+	t.Setenv("WHATSAPP_MCP_TOKEN", "short")
+	if got := runServe(t.TempDir(), nil, []string{"-addr", "127.0.0.1:0"}); got != 2 {
+		t.Fatalf("runServe with short token: want exit 2, got %d", got)
+	}
+}

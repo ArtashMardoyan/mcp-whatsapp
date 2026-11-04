@@ -5,6 +5,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,14 +88,17 @@ func waitFor(t *testing.T, pred func() bool, msg string) {
 	t.Fatalf("timed out waiting for: %s", msg)
 }
 
+const testToken = "test-token-0123456789"
+
 // newTestServer constructs a Server wired to a fake driver, binding to an
 // OS-assigned loopback port so tests can run in parallel without port
 // collisions.
 func newTestServer(t *testing.T, drv pairDriver) *Server {
 	t.Helper()
 	s, err := New(Config{
-		Addr:   "127.0.0.1:0",
-		Driver: drv,
+		Addr:      "127.0.0.1:0",
+		Driver:    drv,
+		AuthToken: testToken,
 	})
 	if err != nil {
 		t.Fatalf("daemon.New: %v", err)
@@ -209,5 +215,134 @@ func TestServer_LogoutErrorFromReset(t *testing.T) {
 	s := newTestServer(t, drv)
 	if err := s.cfg.Driver.Logout(context.Background()); err == nil {
 		t.Fatal("expected logout error to surface")
+	}
+}
+
+func TestNew_RequiresAuthToken(t *testing.T) {
+	if _, err := New(Config{Addr: "127.0.0.1:0", Driver: newFakePairDriver(true)}); err == nil {
+		t.Fatal("want error for empty AuthToken")
+	}
+}
+
+// startLoopback runs a LoopbackOnly server and returns its bound address.
+func startLoopback(t *testing.T) string {
+	t.Helper()
+	s, err := New(Config{Addr: "127.0.0.1:0", Driver: newFakePairDriver(true), AuthToken: testToken, LoopbackOnly: true})
+	if err != nil {
+		t.Fatalf("daemon.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = s.Run(ctx) }()
+	<-s.listenerOK
+	waitFor(t, func() bool { return s.Cache().Paired() }, "paired")
+	return s.BoundAddr()
+}
+
+func status(t *testing.T, req *http.Request) int {
+	t.Helper()
+	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", req.Method, req.URL, err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+func TestServer_HostAndOriginGuard(t *testing.T) {
+	addr := startLoopback(t)
+	_, port, _ := strings.Cut(addr, ":")
+	authed := func(host, origin string) *http.Request {
+		req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/pair", nil)
+		req.Header.Set("Authorization", "Bearer "+testToken)
+		if host != "" {
+			req.Host = host
+		}
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		return req
+	}
+	cases := []struct {
+		name, host, origin string
+		want               int
+	}{
+		{"loopback host", "", "", http.StatusOK},
+		{"localhost host", "localhost:" + port, "", http.StatusOK},
+		{"rebinding host", "evil.example:" + port, "", http.StatusForbidden},
+		{"wrong port", "127.0.0.1:1", "", http.StatusForbidden},
+		{"same origin", "", "http://" + addr, http.StatusOK},
+		{"cross origin", "", "http://evil.example", http.StatusForbidden},
+		{"null origin", "", "null", http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		if got := status(t, authed(tc.host, tc.origin)); got != tc.want {
+			t.Errorf("%s: want %d, got %d", tc.name, tc.want, got)
+		}
+	}
+}
+
+func TestServer_PairTokenCookie(t *testing.T) {
+	base := "http://" + startLoopback(t)
+
+	req, _ := http.NewRequest(http.MethodGet, base+"/pair?token=wrong", nil)
+	if got := status(t, req); got != http.StatusUnauthorized {
+		t.Fatalf("wrong query token: want 401, got %d", got)
+	}
+
+	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := c.Get(base + "/pair?token=" + testToken)
+	if err != nil {
+		t.Fatalf("GET /pair?token: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/pair" {
+		t.Fatalf("want 303 to /pair, got %d %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	cookies := resp.Cookies()
+	if len(cookies) != 1 || !cookies[0].HttpOnly {
+		t.Fatalf("want one HttpOnly cookie, got %+v", cookies)
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, base+"/pair", nil)
+	req.AddCookie(cookies[0])
+	if got := status(t, req); got != http.StatusOK {
+		t.Fatalf("cookie GET /pair: want 200, got %d", got)
+	}
+	// The pairing cookie does not unlock /mcp.
+	req, _ = http.NewRequest(http.MethodPost, base+"/mcp", nil)
+	req.AddCookie(cookies[0])
+	if got := status(t, req); got != http.StatusUnauthorized {
+		t.Fatalf("cookie POST /mcp: want 401, got %d", got)
+	}
+}
+
+func TestLoadOrCreateToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth-token")
+	tok, err := LoadOrCreateToken(path)
+	if err != nil || len(tok) != 64 {
+		t.Fatalf("create: tok len %d err %v", len(tok), err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("want mode 0600, got %v (err %v)", fi.Mode().Perm(), err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	again, err := LoadOrCreateToken(path)
+	if err != nil || again != tok {
+		t.Fatalf("reload: got %q err %v", again, err)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("reload did not tighten mode: %v", fi.Mode().Perm())
+	}
+	if err := os.WriteFile(path, []byte("\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadOrCreateToken(path); err == nil {
+		t.Fatal("want error for empty token file")
 	}
 }

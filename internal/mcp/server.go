@@ -56,3 +56,14 @@ func (s *Server) AttachHTTP(mux *http.ServeMux) {
 	httpHandler := server.NewStreamableHTTPServer(s.mcp, server.WithStateLess(true))
 	mux.Handle("/mcp", httpHandler)
 }
+
+// RestrictToReadOnly drops every tool not annotated readOnlyHint=true, so the
+// server cannot send messages or change account state. Tools without the
+// annotation are dropped too (fail closed).
+func (s *Server) RestrictToReadOnly() {
+	for name, t := range s.mcp.ListTools() {
+		if ro := t.Tool.Annotations.ReadOnlyHint; ro == nil || !*ro {
+			s.mcp.DeleteTools(name)
+		}
+	}
+}

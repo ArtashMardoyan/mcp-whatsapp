@@ -36,23 +36,30 @@ type SendMediaOptions struct {
 	ViewOnce  bool
 }
 
-// Send sends a text message.
-func (c *Client) Send(ctx context.Context, recipient, message string) SendResult {
-	return c.send(ctx, recipient, message, "", false)
+// Send sends a text message. mentions (phone digits or JIDs, groups only)
+// become @-mentions; pass nil for a plain message.
+func (c *Client) Send(ctx context.Context, recipient, message string, mentions []string) SendResult {
+	return c.send(ctx, recipient, message, "", false, mentions)
 }
 
 // SendMediaWithOptions is the extensible entry point for media sends.
 func (c *Client) SendMediaWithOptions(ctx context.Context, opts SendMediaOptions) SendResult {
-	return c.send(ctx, opts.Recipient, opts.Caption, opts.MediaPath, opts.ViewOnce)
+	return c.send(ctx, opts.Recipient, opts.Caption, opts.MediaPath, opts.ViewOnce, nil)
 }
 
 // send is the unified implementation shared by Send and SendMediaWithOptions.
-func (c *Client) send(ctx context.Context, recipient, message, mediaPath string, viewOnce bool) SendResult {
+func (c *Client) send(ctx context.Context, recipient, message, mediaPath string, viewOnce bool, mentions []string) SendResult {
 	if !c.wa.IsConnected() {
 		return SendResult{Success: false, Message: "Not connected to WhatsApp"}
 	}
 
 	recipientJID, err := parseRecipient(recipient)
+	if err != nil {
+		return SendResult{Success: false, Message: err.Error()}
+	}
+
+	// Validate mentions before spending a rate-limit slot.
+	message, mentionInfo, err := c.mentionContext(ctx, recipientJID, message, mentions)
 	if err != nil {
 		return SendResult{Success: false, Message: err.Error()}
 	}
@@ -70,6 +77,8 @@ func (c *Client) send(ctx context.Context, recipient, message, mediaPath string,
 		if err := c.attachMedia(ctx, msg, mediaPath, message, viewOnce); err != nil {
 			return SendResult{Success: false, Message: err.Error()}
 		}
+	} else if mentionInfo != nil {
+		msg.ExtendedTextMessage = mentionText(message, mentionInfo)
 	} else {
 		msg.Conversation = proto.String(message)
 	}
