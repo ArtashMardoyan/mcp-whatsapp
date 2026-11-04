@@ -162,7 +162,7 @@ Data lives under `./store/` (`-store DIR`): `messages.db` (message cache), `what
 | `get_poll_results` | Return the tally for a poll we have cached (includes 0-vote options) |
 | `send_contact_card` | Send a contact card; synthesises a vCard 3.0 from `name` + `phone`, or pass a raw `vcard` to skip synthesis |
 
-Mentions: each entry must be a participant of the target group, or nothing is sent. The message carries WhatsApp mention metadata (the member's LID in LID-addressed groups), and `@<number>` is prepended for any mention the text does not already contain.
+Mentions: each entry must be a participant of the target group, or nothing is sent. The message carries WhatsApp mention metadata (the member's LID in LID-addressed groups), and an `@<phone>` token in the text is rewritten to the token WhatsApp renders for that JID (`@<lid>` in LID groups). A mention with no token in the text is prepended.
 
 ### Message actions
 

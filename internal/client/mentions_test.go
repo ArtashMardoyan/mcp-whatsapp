@@ -36,7 +36,7 @@ func TestResolveMentions_UsesGroupLID(t *testing.T) {
 		t.Fatalf("resolveMentions: %v", err)
 	}
 	// "+447700000001" and "111@lid" are the same member and collapse to one.
-	if len(got) != 2 || got[0].String() != "111@lid" || got[1].String() != "222@lid" {
+	if len(got) != 2 || got[0].jid.String() != "111@lid" || got[1].jid.String() != "222@lid" {
 		t.Fatalf("got %v, want [111@lid 222@lid]", got)
 	}
 }
@@ -55,14 +55,62 @@ func TestResolveMentions_RejectsBadInput(t *testing.T) {
 }
 
 func TestWithMentionTokens(t *testing.T) {
-	jids := []types.JID{{User: "111", Server: types.HiddenUserServer}, {User: "12", Server: types.DefaultUserServer}}
+	ms := []mention{{jid: types.JID{User: "111", Server: types.HiddenUserServer}}, {jid: types.JID{User: "12", Server: types.DefaultUserServer}}}
 	cases := map[string]string{
 		"hi":               "@111 @12 hi",
 		"hi @111 and @12!": "hi @111 and @12!",
 		"@123 hi @111":     "@12 @123 hi @111", // "@123" does not satisfy "@12"
 	}
 	for in, want := range cases {
-		if got := withMentionTokens(in, jids); got != want {
+		if got := withMentionTokens(in, ms); got != want {
+			t.Errorf("withMentionTokens(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestMentionTokens_LIDGroupRewritesPhoneToken(t *testing.T) {
+	ms, err := resolveMentions(lidGroup(), []string{"447700000001"}, noLID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"hi @447700000001":                  "hi @111",
+		"@447700000001, ping @447700000001": "@111, ping @111",
+		"hi":                                "@111 hi",
+		"hi @111":                           "hi @111",
+		"hi @4477000000019":                 "@111 hi @4477000000019", // longer number is not the token
+	}
+	for in, want := range cases {
+		if got := withMentionTokens(in, ms); got != want {
+			t.Errorf("withMentionTokens(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestMentionTokens_PNGroupKeepsPhone(t *testing.T) {
+	pnGroup := &types.GroupInfo{
+		GroupName:      types.GroupName{Name: "Old"},
+		AddressingMode: types.AddressingModePN,
+		Participants: []types.GroupParticipant{{
+			JID:         types.JID{User: "447700000001", Server: types.DefaultUserServer},
+			PhoneNumber: types.JID{User: "447700000001", Server: types.DefaultUserServer},
+			LID:         types.JID{User: "111", Server: types.HiddenUserServer},
+		}},
+	}
+	ms, err := resolveMentions(pnGroup, []string{"111@lid"}, noLID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 1 || ms[0].jid.String() != "447700000001@s.whatsapp.net" {
+		t.Fatalf("got %+v, want the phone JID", ms)
+	}
+	cases := map[string]string{
+		"hi @447700000001": "hi @447700000001",
+		"hi @111":          "hi @447700000001",
+		"hi":               "@447700000001 hi",
+	}
+	for in, want := range cases {
+		if got := withMentionTokens(in, ms); got != want {
 			t.Errorf("withMentionTokens(%q) = %q, want %q", in, got, want)
 		}
 	}

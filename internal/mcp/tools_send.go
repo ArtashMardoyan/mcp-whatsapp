@@ -24,7 +24,7 @@ func (s *Server) registerSendTools() {
 	s.registerSendTyping()
 }
 
-const mentionsDesc = "optional group members to @-mention, as phone digits or JIDs; each must be a participant of the group or nothing is sent. `@<number>` is prepended to the text for any mention the text does not already contain"
+const mentionsDesc = "optional group members to @-mention, as phone digits or JIDs; each must be a participant of the group or nothing is sent. write `@<phone digits>` in the text where the mention should appear (it is rewritten to the LID token in LID-addressed groups); a mention with no token is prepended"
 
 // -- send_message -----------------------------------------------------------
 
