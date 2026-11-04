@@ -24,6 +24,7 @@ func TestHTTP_ListTools(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "http://"+h.addr+"/mcp", bytes.NewReader(buf))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
+	h.authorize(req)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST tools/list: %v", err)
@@ -73,6 +74,7 @@ func TestHTTP_Stateless2026(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodPost, "http://"+h.addr+"/mcp", bytes.NewReader(buf))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/event-stream")
+		h.authorize(req)
 		req.Header.Set("Mcp-Protocol-Version", "2026-07-28")
 		req.Header.Set("Mcp-Method", method)
 		if method == "tools/call" {

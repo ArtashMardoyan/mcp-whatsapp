@@ -21,9 +21,11 @@ import (
 // harness runs ./bin/whatsapp-mcp serve on an OS-assigned loopback port
 // and offers a typed MCP tool-call helper.
 type harness struct {
-	t    *testing.T
-	cmd  *exec.Cmd
-	addr string
+	t         *testing.T
+	cmd       *exec.Cmd
+	addr      string
+	tokenPath string
+	token     string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -51,11 +53,16 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("start daemon: %v", err)
 	}
 
-	h := &harness{t: t, cmd: cmd, addr: addr}
+	h := &harness{t: t, cmd: cmd, addr: addr, tokenPath: filepath.Join(storeDir, "auth-token")}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
 
 	h.waitForReady(5 * time.Second)
 	return h
+}
+
+// authorize adds the bearer token the daemon wrote to <store>/auth-token.
+func (h *harness) authorize(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer "+h.token)
 }
 
 func freePort(t *testing.T) int {
@@ -83,7 +90,12 @@ func (h *harness) waitForReady(d time.Duration) {
 	deadline := time.Now().Add(d)
 	url := "http://" + h.addr + "/pair"
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url) //nolint:gosec
+		// The daemon writes the token file before it starts listening.
+		raw, _ := os.ReadFile(h.tokenPath)
+		h.token = strings.TrimSpace(string(raw))
+		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		h.authorize(req)
+		resp, err := http.DefaultClient.Do(req) //nolint:gosec
 		if err == nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
@@ -121,6 +133,7 @@ func (h *harness) callTool(name string, args map[string]any) toolResult {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+h.addr+"/mcp", bytes.NewReader(buf))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
+	h.authorize(req)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		h.t.Fatalf("POST /mcp: %v", err)
@@ -192,6 +205,7 @@ func (h *harness) initializeMCP() {
 	req, _ := http.NewRequest(http.MethodPost, "http://"+h.addr+"/mcp", bytes.NewReader(buf))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
+	h.authorize(req)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		h.t.Fatalf("initialize: %v", err)

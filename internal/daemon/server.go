@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,14 +37,17 @@ type pairDriver interface {
 // mux is being built so the caller can attach additional handlers (in
 // practice, the /mcp Streamable HTTP handler from internal/mcp).
 //
-// AuthToken, if non-empty, gates /mcp and /pair/* behind the HTTP header
-// `Authorization: Bearer <token>`. Loopback-bound operation passes an
-// empty token and leaves these routes unauthenticated.
+// AuthToken is required and gates /mcp and /pair/* behind the HTTP header
+// `Authorization: Bearer <token>` (a browser opens /pair?token=<token> once
+// and gets an HttpOnly cookie instead). LoopbackOnly additionally rejects
+// any request whose Host is not 127.0.0.1, localhost or [::1] on the bound
+// port, which blocks DNS-rebinding attacks from a browser.
 type Config struct {
-	Addr      string
-	Driver    pairDriver
-	MCPMount  func(mux *http.ServeMux)
-	AuthToken string
+	Addr         string
+	Driver       pairDriver
+	MCPMount     func(mux *http.ServeMux)
+	AuthToken    string
+	LoopbackOnly bool
 }
 
 // Server is the long-lived daemon process. Safe for a single Run call.
@@ -62,6 +68,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.Driver == nil {
 		return nil, errors.New("daemon.New: Driver required")
+	}
+	if cfg.AuthToken == "" {
+		return nil, errors.New("daemon.New: AuthToken required")
 	}
 	return &Server{
 		cfg:        cfg,
@@ -109,12 +118,17 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	}
 
-	rootHandler := authMiddleware(mux, s.cfg.AuthToken)
-
 	ln, err := net.Listen("tcp", s.cfg.Addr)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+
+	var allowedHosts []string
+	if s.cfg.LoopbackOnly {
+		port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+		allowedHosts = []string{"127.0.0.1:" + port, "localhost:" + port, "[::1]:" + port}
+	}
+	rootHandler := originGuard(authMiddleware(mux, s.cfg.AuthToken), allowedHosts)
 
 	s.mu.Lock()
 	s.httpServer = &http.Server{
@@ -186,17 +200,58 @@ func (s *Server) onLoggedOut(ctx context.Context) func() {
 	}
 }
 
+// authCookie carries the bearer token for the browser pairing page, which
+// cannot set an Authorization header.
+const authCookie = "whatsapp_mcp_token"
+
 func authMiddleware(next http.Handler, token string) http.Handler {
-	if token == "" {
-		return next
-	}
 	expected := []byte("Bearer " + token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if requiresAuth(r.URL.Path) {
-			got := r.Header.Get("Authorization")
-			if subtle.ConstantTimeCompare([]byte(got), expected) != 1 {
-				w.Header().Set("WWW-Authenticate", `Bearer realm="whatsapp-mcp"`)
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if !requiresAuth(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// One-time browser login: /pair?token=... sets the cookie, then
+		// redirects so the token leaves the address bar and history.
+		if q := r.URL.Query().Get("token"); q != "" && r.URL.Path == "/pair" {
+			if subtle.ConstantTimeCompare([]byte(q), []byte(token)) != 1 {
+				unauthorized(w)
+				return
+			}
+			http.SetCookie(w, &http.Cookie{Name: authCookie, Value: token, Path: "/pair", HttpOnly: true, SameSite: http.SameSiteStrictMode})
+			http.Redirect(w, r, "/pair", http.StatusSeeOther)
+			return
+		}
+		got := r.Header.Get("Authorization")
+		if c, err := r.Cookie(authCookie); err == nil && got == "" {
+			got = "Bearer " + c.Value
+		}
+		if subtle.ConstantTimeCompare([]byte(got), expected) != 1 {
+			unauthorized(w)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func unauthorized(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", `Bearer realm="whatsapp-mcp"`)
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+}
+
+// originGuard rejects requests whose Host is not in allowedHosts (skipped
+// when allowedHosts is nil, i.e. -allow-remote) and any browser request whose
+// Origin is not the same host as the request.
+func originGuard(next http.Handler, allowedHosts []string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if allowedHosts != nil && !slices.Contains(allowedHosts, r.Host) {
+			http.Error(w, "forbidden host", http.StatusForbidden)
+			return
+		}
+		if o := r.Header.Get("Origin"); o != "" {
+			u, err := url.Parse(o)
+			if err != nil || u.Host != r.Host || (u.Scheme != "http" && u.Scheme != "https") {
+				http.Error(w, "forbidden origin", http.StatusForbidden)
 				return
 			}
 		}
